@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 set(IDF_TARGET "esp32s3")
 set(EXTRA_COMPONENT_DIRS "")
-set(PROJECT_VER "0.1")
+set(PROJECT_VER "0.11")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(aura_lily)

@@ -302,7 +302,17 @@ void audio_pipeline_loop(void)
 
             size_t written = 0;
             size_t out_bytes = num_samples * 4 * sizeof(int16_t);
-            i2s_channel_write(s_tx_chan, out_buf, out_bytes, &written, 100);
+            int64_t write_started_us = esp_timer_get_time();
+            esp_err_t write_ret = i2s_channel_write(s_tx_chan, out_buf, out_bytes, &written, 100);
+            int64_t write_ms = (esp_timer_get_time() - write_started_us) / 1000;
+            if (write_ret != ESP_OK || written != out_bytes || write_ms > 75) {
+                ESP_LOGW(TAG, "I2S playback write ret=0x%x written=%u/%u elapsed_ms=%lld queued=%u",
+                         write_ret,
+                         (unsigned)written,
+                         (unsigned)out_bytes,
+                         (long long)write_ms,
+                         (unsigned)s_play_queued_bytes);
+            }
 
             /* written 是输出字节; 每个源样本 = 4 slots × 2 bytes = 8 bytes */
             size_t samples_written = written / (4 * sizeof(int16_t));

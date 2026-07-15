@@ -2594,8 +2594,8 @@ def test_gateway_default_tts_binary_chunk_matches_device_prefetch_window():
 def test_esp32_tts_followup_queue_matches_prefetch_window():
     ws_client = Path("firmware/esp32/main/network/ws_client.c").read_text(encoding="utf-8")
 
-    assert "#define TTS_PREFETCH_BYTES 2048" in ws_client
-    assert "#define TTS_STREAM_QUEUE_BYTES TTS_PREFETCH_BYTES" in ws_client
+    assert "#define TTS_PREFETCH_BYTES 8192" in ws_client
+    assert "#define TTS_STREAM_QUEUE_BYTES 2048" in ws_client
 
 
 def test_gateway_tts_send_pacing_can_be_disabled(monkeypatch):

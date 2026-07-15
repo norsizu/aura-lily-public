@@ -70,7 +70,16 @@ static const char *s_dither_names[DITHER_MODE_COUNT] = {
 // 帧缓冲
 static uint8_t *s_graybuf = NULL;     // 灰度工作缓冲 (400*300 bytes)
 static uint8_t *s_framebuf = NULL;    // ST7305 block 格式 1-bit 输出 (15000 bytes)
-static uint8_t *s_scene_buf = NULL;   // 场景缓存，避免动画时反复读 SPIFFS
+#define AURA_SCENE_COUNT 3
+#define AURA_SCENE_BYTES (RLCD_WIDTH * RLCD_HEIGHT)
+static uint8_t *s_scene_cache = NULL; // 三张场景启动时一次性预载
+static uint8_t *s_scene_buf = NULL;   // 当前场景在预载缓存中的起始地址
+static bool s_scene_ready[AURA_SCENE_COUNT] = {0};
+static const char *s_scene_files[AURA_SCENE_COUNT] = {
+    ASSETS_BASE_PATH "/scenes/living_room.bin",
+    ASSETS_BASE_PATH "/scenes/bedroom.bin",
+    ASSETS_BASE_PATH "/scenes/study.bin",
+};
 
 // Atlas 缓存
 static atlas_t s_atlas = {0};
@@ -90,45 +99,54 @@ static void fill_fallback_background(uint8_t *buf)
     }
 }
 
-static void ensure_scene_loaded(int scene)
+static uint8_t *scene_buffer(int scene)
 {
-    const char *bg_files[] = {
-        ASSETS_BASE_PATH "/scenes/living_room.bin",
-        ASSETS_BASE_PATH "/scenes/bedroom.bin",
-        ASSETS_BASE_PATH "/scenes/study.bin",
-    };
+    if (!s_scene_cache || scene < 0 || scene >= AURA_SCENE_COUNT) return NULL;
+    return s_scene_cache + (scene * AURA_SCENE_BYTES);
+}
 
-    if (!s_scene_buf) return;
-    if (scene == s_loaded_scene) return;
+static void load_scene(int scene)
+{
+    uint8_t *buf = scene_buffer(scene);
+    if (!buf || s_scene_ready[scene]) return;
 
-    FILE *f = fopen(bg_files[scene], "rb");
+    FILE *f = fopen(s_scene_files[scene], "rb");
     if (!f) {
-        ESP_LOGW(TAG, "Scene not found: %s", bg_files[scene]);
-        fill_fallback_background(s_scene_buf);
-        s_loaded_scene = scene;
+        ESP_LOGW(TAG, "Scene not found: %s", s_scene_files[scene]);
+        fill_fallback_background(buf);
+        s_scene_ready[scene] = true;
         return;
     }
 
     uint32_t file_w = 0;
     uint32_t file_h = 0;
     if (fread(&file_w, 4, 1, f) != 1 || fread(&file_h, 4, 1, f) != 1) {
-        ESP_LOGW(TAG, "Scene header read failed: %s", bg_files[scene]);
-        fill_fallback_background(s_scene_buf);
+        ESP_LOGW(TAG, "Scene header read failed: %s", s_scene_files[scene]);
+        fill_fallback_background(buf);
         fclose(f);
-        s_loaded_scene = scene;
+        s_scene_ready[scene] = true;
         return;
     }
 
     if (file_w == RLCD_WIDTH && file_h == RLCD_HEIGHT &&
-        fread(s_scene_buf, 1, RLCD_WIDTH * RLCD_HEIGHT, f) == RLCD_WIDTH * RLCD_HEIGHT) {
-        ESP_LOGI(TAG, "Scene %d loaded: %lux%lu", scene, (unsigned long)file_w, (unsigned long)file_h);
+        fread(buf, 1, AURA_SCENE_BYTES, f) == AURA_SCENE_BYTES) {
+        ESP_LOGI(TAG, "Scene %d preloaded: %lux%lu", scene, (unsigned long)file_w, (unsigned long)file_h);
     } else {
         ESP_LOGW(TAG, "Scene size/data mismatch: %lux%lu vs %dx%d",
                  (unsigned long)file_w, (unsigned long)file_h, RLCD_WIDTH, RLCD_HEIGHT);
-        fill_fallback_background(s_scene_buf);
+        fill_fallback_background(buf);
     }
 
     fclose(f);
+    s_scene_ready[scene] = true;
+}
+
+static void ensure_scene_loaded(int scene)
+{
+    if (scene < 0 || scene >= AURA_SCENE_COUNT) scene = 0;
+    if (scene == s_loaded_scene && s_scene_buf) return;
+    load_scene(scene);
+    s_scene_buf = scene_buffer(scene);
     s_loaded_scene = scene;
 }
 
@@ -136,12 +154,12 @@ void renderer_init(void)
 {
     s_graybuf = heap_caps_calloc(1, RLCD_WIDTH * RLCD_HEIGHT, MALLOC_CAP_SPIRAM);
     s_framebuf = heap_caps_calloc(1, RLCD_FB_SIZE, MALLOC_CAP_SPIRAM);
-    s_scene_buf = heap_caps_calloc(1, RLCD_WIDTH * RLCD_HEIGHT, MALLOC_CAP_SPIRAM);
+    s_scene_cache = heap_caps_calloc(AURA_SCENE_COUNT, AURA_SCENE_BYTES, MALLOC_CAP_SPIRAM);
     s_pose_buf = heap_caps_calloc(1, 220 * 320, MALLOC_CAP_SPIRAM);
     s_char_err_a = heap_caps_calloc(222, sizeof(int16_t), MALLOC_CAP_SPIRAM);
     s_char_err_b = heap_caps_calloc(222, sizeof(int16_t), MALLOC_CAP_SPIRAM);
 
-    if (!s_graybuf || !s_framebuf || !s_scene_buf || !s_pose_buf ||
+    if (!s_graybuf || !s_framebuf || !s_scene_cache || !s_pose_buf ||
         !s_char_err_a || !s_char_err_b) {
         ESP_LOGE(TAG, "Failed to allocate framebuffers!");
         return;
@@ -154,8 +172,13 @@ void renderer_init(void)
         s_gamma_lut[i] = (v > 255.0f) ? 255 : (uint8_t)v;
     }
 
-    ESP_LOGI(TAG, "Renderer initialized (graybuf=%p, framebuf=%p, scenebuf=%p)",
-             s_graybuf, s_framebuf, s_scene_buf);
+    for (int scene = 0; scene < AURA_SCENE_COUNT; scene++) {
+        load_scene(scene);
+    }
+    ensure_scene_loaded(0);
+
+    ESP_LOGI(TAG, "Renderer initialized (graybuf=%p, framebuf=%p, scene_cache=%p, scenes=%d)",
+             s_graybuf, s_framebuf, s_scene_cache, AURA_SCENE_COUNT);
 }
 
 static void render_background(const aura_state_t *state)
