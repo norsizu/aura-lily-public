@@ -5137,11 +5137,9 @@ class StepfunWsTtsSession:
             except (OSError, ConnectionClosed) as exc:
                 self.error_detail = _ws_exception_detail("StepFun WS TTS", exc)
         if self._receiver_task:
-            try:
-                await asyncio.wait_for(self._receiver_task, timeout=self.timeout)
-            except asyncio.TimeoutError:
-                self.error_detail = self.error_detail or "StepFun WS TTS timeout"
-                self._receiver_task.cancel()
+            # _receive_loop already applies an idle timeout to each recv. A total
+            # timeout here truncates healthy long-form synthesis.
+            await self._receiver_task
         await self.close()
         if is_final and (self.audio_bytes or not self.error_detail):
             await send_tts_binary(self.websocket, self.turn_id, b"", stream_id=self.stream_id, is_final=True)
@@ -5755,6 +5753,7 @@ async def stream_dialogue_and_tts_from_bridge(
     pending_text = ""
     deferred_local_preface = ""
     final_payload: dict[str, Any] | None = None
+    knowledge_stream = False
     tts_results: list[TtsResult] = []
     sent_any_audio = False
     first_segment_http_used = False
@@ -6290,6 +6289,8 @@ async def stream_dialogue_and_tts_from_bridge(
                     })
                 raw_response += delta
                 event_source = str(event.get("source") or "")
+                if event_source in {"kb_qa", "kb_fallback"}:
+                    knowledge_stream = True
                 if event_source in {"local_preface", "local_voice_reply"}:
                     spoken_delta = device_spoken_text(delta, allow_fallback=False)
                     should_defer_local_preface = (
@@ -6313,7 +6314,11 @@ async def stream_dialogue_and_tts_from_bridge(
                     delta = merge_deferred_local_preface_for_tts(deferred_local_preface, delta)
                     deferred_local_preface = ""
                 pending_text += delta
-                if stream_bridge_response_needs_guard(pending_text, transcript=transcript):
+                if stream_bridge_response_requires_guard(
+                    pending_text,
+                    transcript=transcript,
+                    knowledge_stream=knowledge_stream,
+                ):
                     continue
                 if stream_bridge_should_wait_first_sentence(
                     pending_text,
@@ -6334,13 +6339,27 @@ async def stream_dialogue_and_tts_from_bridge(
                     )
                     if not segment:
                         break
-                    if stream_bridge_response_needs_guard(segment, transcript=transcript):
+                    if stream_bridge_response_requires_guard(
+                        segment,
+                        transcript=transcript,
+                        knowledge_stream=knowledge_stream,
+                    ):
                         continue
                     await queue_stream_segment(segment, is_final=False)
                 continue
             if event_type == "final":
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else event
                 final_payload = dict(payload)
+                final_evidence = (
+                    final_payload.get("evidence")
+                    if isinstance(final_payload.get("evidence"), dict)
+                    else {}
+                )
+                if (
+                    str(final_evidence.get("route") or "") == "kb_qa"
+                    or str(final_evidence.get("kb_backend") or "") in {"local", "aliyun_app"}
+                ):
+                    knowledge_stream = True
                 continue
             if event_type == "error":
                 final_payload = {
@@ -6420,21 +6439,41 @@ async def stream_dialogue_and_tts_from_bridge(
         final_payload
         and quality_stop_reason == "voice_quality_guard_after_partial"
         and response
-        and not stream_bridge_response_needs_guard(response, transcript=transcript)
+        and not stream_bridge_response_requires_guard(
+            response,
+            transcript=transcript,
+            knowledge_stream=knowledge_stream,
+        )
     )
     if (
         queued_response
-        and not stream_bridge_response_needs_guard(queued_response, transcript=transcript)
+        and not stream_bridge_response_requires_guard(
+            queued_response,
+            transcript=transcript,
+            knowledge_stream=knowledge_stream,
+        )
         and not prefer_terminal_quality_response
         and (not final_payload or not _text_prefix_equivalent(response, queued_response))
     ):
         response = queued_response
-    if (not final_payload and stream_bridge_response_needs_guard(response, transcript=transcript)) or (
-        final_payload and stream_bridge_response_needs_guard(response, transcript=transcript)
+    if (not final_payload and stream_bridge_response_requires_guard(
+        response,
+        transcript=transcript,
+        knowledge_stream=knowledge_stream,
+    )) or (
+        final_payload and stream_bridge_response_requires_guard(
+            response,
+            transcript=transcript,
+            knowledge_stream=knowledge_stream,
+        )
     ):
         response = (
             queued_response
-            if queued_response and not stream_bridge_response_needs_guard(queued_response, transcript=transcript)
+            if queued_response and not stream_bridge_response_requires_guard(
+                queued_response,
+                transcript=transcript,
+                knowledge_stream=knowledge_stream,
+            )
             else fallback_response
         )
     if not response:
@@ -6446,7 +6485,11 @@ async def stream_dialogue_and_tts_from_bridge(
     final_segments = flush_stream_tts_segments(pending_text)
     if (
         final_segments
-        and stream_bridge_response_needs_guard("".join(final_segments), transcript=transcript)
+        and stream_bridge_response_requires_guard(
+            "".join(final_segments),
+            transcript=transcript,
+            knowledge_stream=knowledge_stream,
+        )
     ):
         final_segments = []
         if tts_segment_count == 0:
@@ -7390,6 +7433,18 @@ def stream_bridge_response_needs_guard(text: str, *, transcript: str = "") -> bo
         if re.search(r"(?:其实[你我]?|感觉[你我]?|看你这|我看|我觉得|我猜你|听得出来|看得出来)[，,。！？!?、；;：: ]*$", cleaned):
             return True
     return False
+
+
+def stream_bridge_response_requires_guard(
+    text: str,
+    *,
+    transcript: str = "",
+    knowledge_stream: bool = False,
+) -> bool:
+    """Keep persona hallucination guards out of source-grounded KB answers."""
+    if knowledge_stream:
+        return False
+    return stream_bridge_response_needs_guard(text, transcript=transcript)
 
 
 def _stream_tts_response_is_empty_opening(text: str, *, transcript: str = "") -> bool:

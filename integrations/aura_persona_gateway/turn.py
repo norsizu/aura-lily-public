@@ -1832,7 +1832,7 @@ class AuraPersonaGateway:
                 delta = str(event.get("text") or "")
                 if delta:
                     response_text += delta
-                    yield {"type": "delta", "text": delta}
+                    yield {"type": "delta", "text": delta, "source": "kb_qa"}
             elif event.get("type") == "final":
                 final_event = dict(event)
         ok = bool(final_event.get("ok"))
