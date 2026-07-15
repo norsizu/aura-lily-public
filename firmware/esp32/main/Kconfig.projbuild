@@ -1,0 +1,14 @@
+menu "Aura Lily"
+
+config AURA_WS_URI_DEFAULT
+    string "Default Aura Lily WebSocket server URI"
+    default "ws://192.168.1.100:8787/ws"
+    help
+        Default WebSocket endpoint used by the ESP32 when no server URL has
+        been saved through the provisioning page.
+
+        For local deployment, use the gateway machine's LAN or Tailscale IP,
+        for example ws://192.168.1.23:8787/ws. Do not use 127.0.0.1 for an
+        ESP32 device, because that would point back to the device itself.
+
+endmenu
