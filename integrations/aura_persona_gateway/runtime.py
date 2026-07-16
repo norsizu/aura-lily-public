@@ -18,6 +18,7 @@ RUNTIME_CONFIG_ENV = "AURA_LILY_AURA_RUNTIME_CONFIG_PATH"
 FAST_REPLY_MODES = {"local_rule", "hermes_main", "light_model"}
 AURA_MODEL_MODES = {"hermes_main", "hermes_agent", "aura_model", "direct_llm"}
 ASR_MODES = {"local", "api"}
+KB_BACKENDS = {"aliyun_app"}
 HISTORY_LIMIT = 12
 PROFILE_LIMIT = 24
 WEATHER_CACHE_LIMIT = 12
@@ -289,16 +290,14 @@ class AuraRuntimeConfig:
     asr_timeout_seconds: int = 30
     asr_profiles: tuple[dict[str, Any], ...] = ()
     kb_qa_enabled: bool = False
-    kb_active_id: str = ""
-    kb_embedding_base_url: str = "https://api.jina.ai/v1"
-    kb_embedding_api_key: str = ""
-    kb_embedding_model: str = "jina-embeddings-v3"
-    kb_embedding_timeout_seconds: int = 30
-    kb_top_k: int = 5
-    kb_score_threshold: str = "0.45"
+    # KB 后端：aliyun_app（阿里云百炼知识库应用，RAG 云端完成）。
+    # 本仓库不含本地向量检索后端。
+    kb_backend: str = "aliyun_app"
+    kb_aliyun_endpoint: str = ""
+    kb_aliyun_api_key: str = ""
+    kb_aliyun_agent_id: str = ""
+    kb_aliyun_timeout_seconds: int = 30
     kb_fallback_text: str = "我的知识库里没有相关的信息。"
-    kb_query_prefix: str = ""
-    kb_short_query_hint: str = "这个问题有点短，我没有查到相关内容，麻烦把问题说得具体一点，比如带上想问的东西。"
     config_history: tuple[dict[str, Any], ...] = ()
 
     @property
@@ -313,12 +312,12 @@ class AuraRuntimeConfig:
         fast_key = bool(str(data.pop("fast_reply_api_key", "")).strip())
         tts_key = bool(str(data.pop("tts_api_key", "")).strip())
         asr_key = bool(str(data.pop("asr_api_key", "")).strip())
-        kb_embedding_key = bool(str(data.pop("kb_embedding_api_key", "")).strip())
+        kb_aliyun_key = bool(str(data.pop("kb_aliyun_api_key", "")).strip())
         data["aura_model_api_key_configured"] = aura_key
         data["fast_reply_api_key_configured"] = fast_key
         data["tts_api_key_configured"] = tts_key
         data["asr_api_key_configured"] = asr_key
-        data["kb_embedding_api_key_configured"] = kb_embedding_key
+        data["kb_aliyun_api_key_configured"] = kb_aliyun_key
         data["runtime_config_path"] = str(self.runtime_config_path)
         data["aura_model_modes"] = [
             {
@@ -692,9 +691,9 @@ def _merge_config(
             if _coerce_bool(value, False):
                 values["asr_api_key"] = ""
             continue
-        if key == "clear_kb_embedding_api_key":
+        if key == "clear_kb_aliyun_api_key":
             if _coerce_bool(value, False):
-                values["kb_embedding_api_key"] = ""
+                values["kb_aliyun_api_key"] = ""
             continue
         if key == "touch_cached_weather":
             if _coerce_bool(value, False):
@@ -717,7 +716,7 @@ def _merge_config(
             weather_fields_seen = True
             before = getattr(config, key, "")
             weather_fields_changed = weather_fields_changed or str(value or "").strip() != str(before or "").strip()
-        if key in {"aura_model_api_key", "fast_reply_api_key", "tts_api_key", "asr_api_key", "kb_embedding_api_key"}:
+        if key in {"aura_model_api_key", "fast_reply_api_key", "tts_api_key", "asr_api_key", "kb_aliyun_api_key"}:
             text = "" if value is None else str(value).strip()
             if preserve_existing_secrets and (not text or text == CONFIGURED_VALUE_MARKER):
                 continue
@@ -772,23 +771,15 @@ def _merge_config(
     if not values["tts_provider"]:
         values["tts_provider"] = "none"
     values["asr_mode"] = _choice(values["asr_mode"], config.asr_mode, ASR_MODES)
+    values["kb_backend"] = _choice(values.get("kb_backend"), config.kb_backend, KB_BACKENDS)
+    values["kb_aliyun_timeout_seconds"] = max(1, int(values["kb_aliyun_timeout_seconds"] or 30))
     values["asr_timeout_seconds"] = max(1, int(values["asr_timeout_seconds"] or 30))
     if not values["asr_provider"]:
         values["asr_provider"] = "local" if values["asr_mode"] == "local" else "custom"
     values["tts_profiles"] = _updated_audio_profiles("tts", values)
     values["asr_profiles"] = _updated_audio_profiles("asr", values)
-    values["kb_top_k"] = max(1, min(20, int(values["kb_top_k"] or 5)))
-    values["kb_score_threshold"] = _ratio_text(values["kb_score_threshold"], config.kb_score_threshold)
-    values["kb_embedding_timeout_seconds"] = max(1, int(values["kb_embedding_timeout_seconds"] or 30))
     if not str(values.get("kb_fallback_text") or "").strip():
         values["kb_fallback_text"] = "我的知识库里没有相关的信息。"
-    values["kb_query_prefix"] = str(values.get("kb_query_prefix") or "").strip()
-    if not str(values.get("kb_short_query_hint") or "").strip():
-        values["kb_short_query_hint"] = "这个问题有点短，我没有查到相关内容，麻烦把问题说得具体一点，比如带上想问的东西。"
-    if not str(values.get("kb_embedding_base_url") or "").strip():
-        values["kb_embedding_base_url"] = "https://api.jina.ai/v1"
-    if not str(values.get("kb_embedding_model") or "").strip():
-        values["kb_embedding_model"] = "jina-embeddings-v3"
     values["config_history"] = _updated_history(values)
     return AuraRuntimeConfig(**values)
 

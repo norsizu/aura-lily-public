@@ -11,15 +11,13 @@ let asrPresets = [];
 let ttsProfiles = [];
 let asrProfiles = [];
 let lastSummary = {};
-let kbList = [];
-let kbPollTimer = null;
 let revealed = {
   hermes: false,
   auraModel: false,
   fastReply: false,
   tts: false,
   asr: false,
-  kbEmbedding: false,
+  kbAliyun: false,
 };
 
 const headers = () => ({
@@ -919,12 +917,6 @@ async function loadAll() {
   } catch (err) {
     setStatus("worldStatus", err.message, false);
   }
-  try {
-    await loadKbPanel();
-    await loadKbDocs();
-  } catch (err) {
-    setStatus("kbListStatus", err.message, false);
-  }
   fillDashboard(summary);
   setStatus("globalStatus", "已登录。", true);
   setBadge("connectionBadge", "已连接", "ok");
@@ -1304,12 +1296,12 @@ async function revealSecret(kind) {
       path: "/admin/aura/secret/asr_api_key",
       configured: config.asr_api_key_configured,
     },
-    kbEmbedding: {
-      input: "kbEmbeddingApiKey",
-      button: "showKbEmbeddingKey",
-      badge: "kbEmbeddingKeyBadge",
-      path: "/admin/aura/secret/kb_embedding_api_key",
-      configured: config.kb_embedding_api_key_configured,
+    kbAliyun: {
+      input: "kbAliyunApiKey",
+      button: "showKbAliyunKey",
+      badge: "kbAliyunKeyBadge",
+      path: "/admin/aura/secret/kb_aliyun_api_key",
+      configured: config.kb_aliyun_api_key_configured,
     },
   };
   const item = map[kind];
@@ -1478,23 +1470,15 @@ async function refreshWorld() {
   fillDashboard(lastSummary);
 }
 
-// ---------------------------------------------------------------- 知识库（RAG）
-
-const KB_UPLOAD_MAX_MB = 20;
-const KB_DOC_STATUS = {
-  pending: ["待处理", "muted"],
-  processing: ["处理中", "warn"],
-  ready: ["就绪", "ok"],
-  failed: ["失败", "bad"],
-};
+// ---------------------------------------------------------------- 知识库（在线应用）
 
 function updateKbBadge(config) {
   if (!config.kb_qa_enabled) {
     setBadge("kbBadge", "问答模式已关闭", "muted");
-  } else if (!config.kb_active_id) {
-    setBadge("kbBadge", "已开启，但未选择激活知识库", "warn");
-  } else if (!config.kb_embedding_api_key_configured) {
-    setBadge("kbBadge", "已开启，但未保存 Embedding API Key", "warn");
+  } else if (!config.kb_aliyun_agent_id) {
+    setBadge("kbBadge", "已开启，但未填写应用 ID", "warn");
+  } else if (!config.kb_aliyun_api_key_configured) {
+    setBadge("kbBadge", "已开启，但未保存 API Key", "warn");
   } else {
     setBadge("kbBadge", "问答模式已开启", "ok");
   }
@@ -1502,22 +1486,18 @@ function updateKbBadge(config) {
 
 function fillKbSettings(config) {
   bool("kbQaEnabled", config.kb_qa_enabled);
-  val("kbTopK", config.kb_top_k || 5);
-  val("kbScoreThreshold", config.kb_score_threshold || "0.45");
+  val("kbAliyunEndpoint", config.kb_aliyun_endpoint || "");
+  val("kbAliyunAgentId", config.kb_aliyun_agent_id || "");
+  val("kbAliyunTimeout", config.kb_aliyun_timeout_seconds || 30);
   val("kbFallbackText", config.kb_fallback_text || "我的知识库里没有相关的信息。");
-  val("kbQueryPrefix", config.kb_query_prefix || "");
-  val("kbShortQueryHint", config.kb_short_query_hint || "");
-  val("kbEmbeddingBaseUrl", config.kb_embedding_base_url || "https://api.jina.ai/v1");
-  val("kbEmbeddingModel", config.kb_embedding_model || "jina-embeddings-v3");
-  val("kbEmbeddingTimeout", config.kb_embedding_timeout_seconds || 30);
-  maskInput("kbEmbeddingApiKey", config.kb_embedding_api_key_configured, "粘贴 Embedding API Key");
-  revealed.kbEmbedding = false;
-  const showButton = $("showKbEmbeddingKey");
+  maskInput("kbAliyunApiKey", config.kb_aliyun_api_key_configured, "粘贴知识库应用 API Key");
+  revealed.kbAliyun = false;
+  const showButton = $("showKbAliyunKey");
   if (showButton) showButton.textContent = "查看";
   setBadge(
-    "kbEmbeddingKeyBadge",
-    config.kb_embedding_api_key_configured ? "已保存" : "未保存",
-    config.kb_embedding_api_key_configured ? "ok" : "warn",
+    "kbAliyunKeyBadge",
+    config.kb_aliyun_api_key_configured ? "已保存" : "未保存",
+    config.kb_aliyun_api_key_configured ? "ok" : "warn",
   );
   updateKbBadge(config);
 }
@@ -1525,16 +1505,11 @@ function fillKbSettings(config) {
 function kbSettingsPayload(extra = {}) {
   return {
     kb_qa_enabled: $("kbQaEnabled").checked,
-    kb_active_id: $("kbActiveSelect").value,
-    kb_top_k: intOr("kbTopK", 5),
-    kb_score_threshold: $("kbScoreThreshold").value.trim(),
+    kb_aliyun_endpoint: $("kbAliyunEndpoint").value.trim(),
+    kb_aliyun_agent_id: $("kbAliyunAgentId").value.trim(),
+    kb_aliyun_api_key: $("kbAliyunApiKey").value.trim(),
+    kb_aliyun_timeout_seconds: intOr("kbAliyunTimeout", 30),
     kb_fallback_text: $("kbFallbackText").value.trim(),
-    kb_query_prefix: $("kbQueryPrefix").value.trim(),
-    kb_short_query_hint: $("kbShortQueryHint").value.trim(),
-    kb_embedding_base_url: $("kbEmbeddingBaseUrl").value.trim(),
-    kb_embedding_model: $("kbEmbeddingModel").value.trim(),
-    kb_embedding_api_key: $("kbEmbeddingApiKey").value.trim(),
-    kb_embedding_timeout_seconds: intOr("kbEmbeddingTimeout", 30),
     ...extra,
   };
 }
@@ -1546,373 +1521,12 @@ async function saveKbSettings(extra = {}) {
   });
   lastSummary.aura_runtime = payload.config || {};
   fillKbSettings(lastSummary.aura_runtime);
-  await loadKbPanel();
   setStatus("kbSettingsStatus", "问答模式设置已保存，下一回合生效。", true);
 }
 
-async function clearKbEmbeddingKey() {
-  await saveKbSettings({ kb_embedding_api_key: "", clear_kb_embedding_api_key: true });
-  setStatus("kbSettingsStatus", "Embedding API Key 已清除。", true);
-}
-
-function populateKbSelect(selectId, selectedId, emptyLabel) {
-  const select = $(selectId);
-  if (!select) return;
-  select.innerHTML = "";
-  if (emptyLabel) {
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = emptyLabel;
-    select.appendChild(empty);
-  }
-  for (const kb of kbList) {
-    const opt = document.createElement("option");
-    opt.value = kb.id;
-    opt.textContent = `${kb.name}（${kb.doc_count || 0} 文档 / ${kb.chunk_count || 0} 片段）`;
-    select.appendChild(opt);
-  }
-  select.value = selectedId || "";
-}
-
-async function loadKbPanel() {
-  const payload = await api("/admin/kb/list");
-  kbList = payload.kbs || [];
-  const activeId = payload.active_id || "";
-  populateKbSelect("kbActiveSelect", activeId, "不使用问答（保持人格对话）");
-  const manage = $("kbManageSelect");
-  const previous = manage ? manage.value : "";
-  const ids = kbList.map((kb) => kb.id);
-  const manageId = ids.includes(previous)
-    ? previous
-    : ids.includes(activeId)
-      ? activeId
-      : ids[0] || "";
-  populateKbSelect("kbManageSelect", manageId, kbList.length ? "" : "暂无知识库，请先新建");
-  const search = $("kbSearchSelect");
-  const prevSearch = search ? search.value : "";
-  const searchId = ids.includes(prevSearch)
-    ? prevSearch
-    : ids.includes(activeId)
-      ? activeId
-      : ids[0] || "";
-  populateKbSelect("kbSearchSelect", searchId, kbList.length ? "" : "暂无知识库，请先新建");
-  renderKbList(activeId);
-  updateKbBadge(lastSummary.aura_runtime || {});
-}
-
-function renderKbList(activeId) {
-  const container = $("kbListContainer");
-  if (!container) return;
-  container.innerHTML = "";
-  if (!kbList.length) {
-    setStatus("kbListStatus", "暂无知识库，先在上面新建一个。", true);
-    return;
-  }
-  setStatus("kbListStatus", `共 ${kbList.length} 个知识库。`, true);
-  for (const kb of kbList) {
-    const row = document.createElement("div");
-    row.className = "kb-row";
-    const main = document.createElement("div");
-    main.className = "kb-main";
-    const name = document.createElement("div");
-    name.className = "kb-name";
-    name.textContent = kb.id === activeId ? `${kb.name}（问答激活中）` : kb.name;
-    const meta = document.createElement("div");
-    meta.className = "kb-meta";
-    meta.textContent = `${kb.doc_count || 0} 文档 · ${kb.chunk_count || 0} 片段 · ${kb.id}`;
-    main.append(name, meta);
-    const actions = document.createElement("div");
-    actions.className = "kb-actions";
-    const manageButton = document.createElement("button");
-    manageButton.type = "button";
-    manageButton.className = "secondary";
-    manageButton.textContent = "管理文档";
-    manageButton.addEventListener("click", async () => {
-      stopKbDocPolling();
-      $("kbManageSelect").value = kb.id;
-      try {
-        await loadKbDocs();
-      } catch (err) {
-        setStatus("kbDocsStatus", err.message, false);
-      }
-    });
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "secondary";
-    deleteButton.textContent = "删除";
-    deleteButton.addEventListener("click", async () => {
-      if (!window.confirm(`确定删除知识库「${kb.name}」？其中所有文档与向量索引都会一并删除。`)) return;
-      try {
-        await api("/admin/kb/delete", { method: "POST", body: JSON.stringify({ kb_id: kb.id }) });
-        stopKbDocPolling();
-        await loadKbPanel();
-        await loadKbDocs();
-        setStatus("kbListStatus", `知识库「${kb.name}」已删除。`, true);
-      } catch (err) {
-        setStatus("kbListStatus", err.message, false);
-      }
-    });
-    actions.append(manageButton, deleteButton);
-    row.append(main, actions);
-    container.appendChild(row);
-  }
-}
-
-async function createKb() {
-  const name = $("kbNewName").value.trim();
-  if (!name) {
-    setStatus("kbListStatus", "请先填写知识库名称。", false);
-    return;
-  }
-  const payload = await api("/admin/kb/create", { method: "POST", body: JSON.stringify({ name }) });
-  $("kbNewName").value = "";
-  await loadKbPanel();
-  const kbId = payload.kb?.id || "";
-  if (kbId) {
-    $("kbManageSelect").value = kbId;
-    await loadKbDocs();
-  }
-  setStatus("kbListStatus", `知识库「${name}」已创建，可以开始上传文档。`, true);
-}
-
-async function loadKbDocs() {
-  const kbId = $("kbManageSelect").value;
-  const container = $("kbDocsContainer");
-  if (kbId !== kbDocsKbId) {
-    kbDocsKbId = kbId;
-    kbDocsPage = 1;
-  }
-  if (!kbId) {
-    kbDocsCache = [];
-    if (container) container.innerHTML = "";
-    const pager = $("kbDocsPager");
-    if (pager) pager.style.display = "none";
-    setStatus("kbDocsStatus", "请先选择一个知识库。", true);
-    return [];
-  }
-  const payload = await api(`/admin/kb/docs?kb_id=${encodeURIComponent(kbId)}`);
-  const docs = payload.docs || [];
-  renderKbDocs(docs);
-  return docs;
-}
-
-const KB_DOCS_PAGE_SIZE = 10;
-let kbDocsCache = [];
-let kbDocsPage = 1;
-let kbDocsKbId = "";
-
-function renderKbDocs(docs) {
-  if (Array.isArray(docs)) kbDocsCache = docs;
-  const container = $("kbDocsContainer");
-  if (!container) return;
-  container.innerHTML = "";
-  const keyword = ($("kbDocSearch").value || "").trim().toLowerCase();
-  const filtered = keyword
-    ? kbDocsCache.filter((doc) => String(doc.filename || doc.id || "").toLowerCase().includes(keyword))
-    : kbDocsCache;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / KB_DOCS_PAGE_SIZE));
-  if (kbDocsPage > totalPages) kbDocsPage = totalPages;
-  if (kbDocsPage < 1) kbDocsPage = 1;
-  const pager = $("kbDocsPager");
-  if (pager) pager.style.display = totalPages > 1 ? "" : "none";
-  const info = $("kbDocsPageInfo");
-  if (info) info.textContent = `第 ${kbDocsPage} / ${totalPages} 页`;
-  $("kbDocsPrevPage").disabled = kbDocsPage <= 1;
-  $("kbDocsNextPage").disabled = kbDocsPage >= totalPages;
-  if (!kbDocsCache.length) {
-    setStatus("kbDocsStatus", "这个知识库还没有文档。", true);
-    return;
-  }
-  if (!filtered.length) {
-    setStatus("kbDocsStatus", `没有匹配的文档（共 ${kbDocsCache.length} 个），换个关键字试试。`, true);
-    return;
-  }
-  setStatus(
-    "kbDocsStatus",
-    keyword ? `匹配 ${filtered.length} / ${kbDocsCache.length} 个文档。` : `共 ${kbDocsCache.length} 个文档。`,
-    true,
-  );
-  const start = (kbDocsPage - 1) * KB_DOCS_PAGE_SIZE;
-  for (const doc of filtered.slice(start, start + KB_DOCS_PAGE_SIZE)) {
-    const row = document.createElement("div");
-    row.className = "kb-row";
-    const main = document.createElement("div");
-    main.className = "kb-main";
-    const name = document.createElement("div");
-    name.className = "kb-name";
-    name.textContent = doc.filename || doc.id;
-    const meta = document.createElement("div");
-    meta.className = "kb-meta";
-    const [statusText, statusTone] = KB_DOC_STATUS[doc.status] || [doc.status || "未知", "muted"];
-    const badge = document.createElement("span");
-    badge.className = `badge ${statusTone}`;
-    badge.textContent = statusText;
-    meta.appendChild(badge);
-    const detail = document.createElement("span");
-    detail.textContent =
-      doc.status === "failed" && doc.error
-        ? ` ${doc.error}`
-        : ` ${doc.char_count || 0} 字 · ${doc.chunk_count || 0} 片段`;
-    meta.appendChild(detail);
-    main.append(name, meta);
-    const actions = document.createElement("div");
-    actions.className = "kb-actions";
-    const reindexButton = document.createElement("button");
-    reindexButton.type = "button";
-    reindexButton.className = "secondary";
-    reindexButton.textContent = "重建索引";
-    reindexButton.addEventListener("click", async () => {
-      try {
-        await api("/admin/kb/doc/reindex", { method: "POST", body: JSON.stringify({ doc_id: doc.id }) });
-        setStatus("kbDocsStatus", `「${doc.filename}」正在重建索引...`, true);
-        await loadKbDocs();
-        startKbDocPolling();
-      } catch (err) {
-        setStatus("kbDocsStatus", err.message, false);
-      }
-    });
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "secondary";
-    deleteButton.textContent = "删除";
-    deleteButton.addEventListener("click", async () => {
-      if (!window.confirm(`确定删除文档「${doc.filename}」？`)) return;
-      try {
-        await api("/admin/kb/doc/delete", { method: "POST", body: JSON.stringify({ doc_id: doc.id }) });
-        await loadKbDocs();
-        await loadKbPanel();
-        setStatus("kbDocsStatus", `文档「${doc.filename}」已删除。`, true);
-      } catch (err) {
-        setStatus("kbDocsStatus", err.message, false);
-      }
-    });
-    actions.append(reindexButton, deleteButton);
-    row.append(main, actions);
-    container.appendChild(row);
-  }
-}
-
-function stopKbDocPolling() {
-  if (kbPollTimer) {
-    clearInterval(kbPollTimer);
-    kbPollTimer = null;
-  }
-}
-
-function startKbDocPolling() {
-  stopKbDocPolling();
-  kbPollTimer = setInterval(async () => {
-    try {
-      const docs = await loadKbDocs();
-      const busy = docs.some((doc) => doc.status === "pending" || doc.status === "processing");
-      if (busy) return;
-      stopKbDocPolling();
-      await loadKbPanel();
-      const failed = docs.filter((doc) => doc.status === "failed").length;
-      setStatus(
-        "kbDocsStatus",
-        failed ? `处理完成，但有 ${failed} 个文档失败，看红色标记里的原因。` : "文档处理完成，向量索引已就绪。",
-        !failed,
-      );
-    } catch (err) {
-      stopKbDocPolling();
-      setStatus("kbDocsStatus", err.message, false);
-    }
-  }, 2000);
-}
-
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("读取文件失败"));
-    reader.onload = () => {
-      const text = String(reader.result || "");
-      resolve(text.includes(",") ? text.slice(text.indexOf(",") + 1) : text);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-async function uploadKbFile() {
-  const kbId = $("kbManageSelect").value;
-  if (!kbId) {
-    setStatus("kbDocsStatus", "请先选择一个知识库。", false);
-    return;
-  }
-  const input = $("kbFileInput");
-  const files = Array.from(input.files || []);
-  if (!files.length) {
-    setStatus("kbDocsStatus", "请先选择要上传的文档。", false);
-    return;
-  }
-  // 逐个顺序上传：避免大量 base64 同时占内存，也对 embedding 服务更友好。
-  const skipped = [];
-  const failed = [];
-  let uploaded = 0;
-  for (const [index, file] of files.entries()) {
-    if (file.size > KB_UPLOAD_MAX_MB * 1024 * 1024) {
-      skipped.push(file.name);
-      continue;
-    }
-    setStatus("kbDocsStatus", `上传中 ${index + 1}/${files.length}：${file.name}`, true);
-    try {
-      const contentBase64 = await readFileAsBase64(file);
-      await api("/admin/kb/upload", {
-        method: "POST",
-        body: JSON.stringify({ kb_id: kbId, filename: file.name, content_base64: contentBase64 }),
-      });
-      uploaded += 1;
-    } catch (err) {
-      failed.push(`${file.name}（${err.message}）`);
-    }
-  }
-  input.value = "";
-  const parts = [];
-  if (uploaded) parts.push(`${uploaded} 个文档已上传，后台正在分块和向量化...`);
-  if (skipped.length) parts.push(`${skipped.length} 个超过 ${KB_UPLOAD_MAX_MB}MB 已跳过：${skipped.join("、")}`);
-  if (failed.length) parts.push(`${failed.length} 个上传失败：${failed.join("、")}`);
-  setStatus("kbDocsStatus", parts.join(" ") || "没有可上传的文档。", !skipped.length && !failed.length && uploaded > 0);
-  await loadKbDocs();
-  if (uploaded) startKbDocPolling();
-}
-
-async function testKbSearch() {
-  const kbId = $("kbSearchSelect").value;
-  const query = $("kbSearchQuery").value.trim();
-  const container = $("kbSearchResults");
-  if (container) container.innerHTML = "";
-  if (!kbId) {
-    setStatus("kbSearchStatus", "请先选择一个知识库。", false);
-    return;
-  }
-  if (!query) {
-    setStatus("kbSearchStatus", "请先输入测试问题。", false);
-    return;
-  }
-  setStatus("kbSearchStatus", "检索中...", true);
-  const payload = await api("/admin/kb/search", {
-    method: "POST",
-    body: JSON.stringify({ kb_id: kbId, query }),
-  });
-  const hits = payload.hits || [];
-  if (!hits.length) {
-    setStatus("kbSearchStatus", `没有命中任何片段（阈值 ${payload.score_threshold ?? "?"}），问答模式会回复兜底话术。`, true);
-    return;
-  }
-  setStatus("kbSearchStatus", `命中 ${hits.length} 个片段。`, true);
-  if (!container) return;
-  for (const hit of hits) {
-    const item = document.createElement("div");
-    item.className = "kb-hit";
-    const score = document.createElement("div");
-    score.className = "kb-hit-score";
-    score.textContent = `score ${Number(hit.score || 0).toFixed(3)} · ${hit.filename || ""}`;
-    const content = document.createElement("div");
-    content.className = "kb-hit-content";
-    content.textContent = hit.content || "";
-    item.append(score, content);
-    container.appendChild(item);
-  }
+async function clearKbAliyunKey() {
+  await saveKbSettings({ kb_aliyun_api_key: "", clear_kb_aliyun_api_key: true });
+  setStatus("kbSettingsStatus", "知识库 API Key 已清除。", true);
 }
 
 function setActivePanel(name) {
@@ -2017,31 +1631,8 @@ wireButton("saveSoul", saveSoul, "soulStatus");
 wireButton("saveState", saveState, "stateStatus");
 wireButton("refreshWorld", refreshWorld, "worldStatus");
 wireButton("saveKbSettings", () => saveKbSettings(), "kbSettingsStatus");
-wireButton("clearKbEmbeddingKey", clearKbEmbeddingKey, "kbSettingsStatus");
-wireButton("showKbEmbeddingKey", () => revealSecret("kbEmbedding"), "kbSettingsStatus");
-wireButton("createKb", createKb, "kbListStatus");
-wireButton("uploadKbFile", uploadKbFile, "kbDocsStatus");
-wireButton("refreshKbDocs", async () => {
-  await loadKbPanel();
-  await loadKbDocs();
-}, "kbDocsStatus");
-wireButton("testKbSearch", testKbSearch, "kbSearchStatus");
-$("kbDocSearch").addEventListener("input", () => {
-  kbDocsPage = 1;
-  renderKbDocs();
-});
-$("kbDocsPrevPage").addEventListener("click", () => {
-  kbDocsPage -= 1;
-  renderKbDocs();
-});
-$("kbDocsNextPage").addEventListener("click", () => {
-  kbDocsPage += 1;
-  renderKbDocs();
-});
-$("kbManageSelect").addEventListener("change", () => {
-  stopKbDocPolling();
-  loadKbDocs().catch((err) => setStatus("kbDocsStatus", err.message, false));
-});
+wireButton("clearKbAliyunKey", clearKbAliyunKey, "kbSettingsStatus");
+wireButton("showKbAliyunKey", () => revealSecret("kbAliyun"), "kbSettingsStatus");
 
 syncPanelFromHash();
 populateProviderPresetSelect();

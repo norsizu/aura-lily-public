@@ -11,20 +11,17 @@ from typing import Any, Iterator
 from integrations.hermes_lily_cli.bridge import HermesLilyBridge, HermesLilyResult
 from integrations.hermes_lily_cli.runtime_config import load_hermes_provider_catalog
 
+from .aliyun_kb import AliyunKbClient, AliyunKbConfig
 from .assets import load_persona_assets
 from .config import PersonaGatewayConfig, load_persona_config
 from .context import PersonaContext, build_persona_context
 from .grounded_intent import classify_grounded_current_intent
-from .knowledge import EmbeddingClient, EmbeddingConfig, KnowledgeStore, default_kb_db_path, kb_search
 from .llm import AGENT_TASK_MARKER, DirectLlmClient, DirectLlmConfig
 from .outlets import evaluate_lily_outlets
 from .query_context import correction_focus_text, resolve_query_context
 from .response_contract import (
     DEFAULT_KB_FALLBACK_TEXT,
-    DEFAULT_KB_SHORT_QUERY_HINT,
     FALLBACK_SPOKEN_REPLY,
-    KB_QA_SYSTEM_PROMPT,
-    build_kb_qa_prompt,
     normalize_spoken_reply,
 )
 from .runtime import CONFIGURED_VALUE_MARKER, AuraRuntimeConfig, cached_weather_snapshot, load_aura_runtime_config
@@ -42,15 +39,6 @@ from .world import build_world_snapshot
 
 VOICE_STREAM_MAX_TOKENS = 128
 VOICE_STREAM_DETAIL_MAX_TOKENS = 384
-KB_QA_MAX_TOKENS = 512
-KB_QA_TEMPERATURE = 0.2
-KB_QA_UNAVAILABLE_TEXT = "知识库检索暂时不可用，请稍后再试。"
-KB_SHORT_QUERY_MAX_CHARS = 6
-
-
-def _kb_query_is_short(user_text: str) -> bool:
-    stripped = re.sub(r"[\s，。？！、,.?!~～]", "", str(user_text or ""))
-    return 0 < len(stripped) <= KB_SHORT_QUERY_MAX_CHARS
 
 
 @dataclass(frozen=True)
@@ -1644,79 +1632,23 @@ class AuraPersonaGateway:
         return snapshot if snapshot.get("status") == "fresh" else {}
 
     # ---------------------------------------------------------- KB Q&A mode
-    def _kb_qa_active(self) -> bool:
+    # GitHub 版只保留在线知识库应用后端（RAG 云端完成）；kb_backend=local
+    # 的本地向量检索实现不随本仓库发布。
+    def _kb_aliyun_active(self) -> bool:
         rc = self.runtime_config
         return (
             bool(rc.kb_qa_enabled)
-            and bool(str(rc.kb_active_id or "").strip())
-            and bool(str(rc.kb_embedding_api_key or "").strip())
+            and str(getattr(rc, "kb_backend", "") or "").strip() == "aliyun_app"
+            and bool(str(rc.kb_aliyun_endpoint or "").strip())
+            and bool(str(rc.kb_aliyun_api_key or "").strip())
+            and bool(str(rc.kb_aliyun_agent_id or "").strip())
         )
 
-    def _kb_retrieve(self, user_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        rc = self.runtime_config
-        debug: dict[str, Any] = {
-            "kb_id": str(rc.kb_active_id or ""),
-            "kb_embedding_model": str(rc.kb_embedding_model or ""),
-        }
-        try:
-            threshold = float(str(rc.kb_score_threshold or "0.45").strip())
-        except (TypeError, ValueError):
-            threshold = 0.45
-        try:
-            store = KnowledgeStore(default_kb_db_path(self.config.persona_home))
-            embedder = EmbeddingClient(
-                EmbeddingConfig(
-                    base_url=rc.kb_embedding_base_url,
-                    api_key=rc.kb_embedding_api_key,
-                    model=rc.kb_embedding_model,
-                    timeout_seconds=float(rc.kb_embedding_timeout_seconds or 30),
-                )
-            )
-            query = str(user_text or "").strip()
-            prefix = str(rc.kb_query_prefix or "").strip()
-            if prefix and _kb_query_is_short(query) and prefix not in query:
-                query = f"{prefix}{query}"
-                debug["kb_query_expanded"] = query
-            hits = kb_search(
-                store,
-                embedder,
-                kb_id=rc.kb_active_id,
-                query=query,
-                top_k=int(rc.kb_top_k or 5),
-                score_threshold=threshold,
-            )
-            debug["kb_scores"] = [round(float(hit.get("score") or 0.0), 3) for hit in hits]
-            return hits, debug
-        except Exception as exc:  # noqa: BLE001 - retrieval failure must degrade, not crash the turn
-            debug["kb_error"] = f"{exc.__class__.__name__}: {exc}"
-            return [], debug
-
-    def _kb_llm_client(self, fallback: str) -> DirectLlmClient:
-        rc = self.runtime_config
-        return DirectLlmClient(
-            DirectLlmConfig(
-                provider=rc.aura_model_provider,
-                model=rc.aura_model_model,
-                base_url=rc.aura_model_base_url,
-                api_key=rc.aura_model_api_key,
-                timeout_seconds=float(rc.aura_model_timeout_seconds or 90),
-                max_tokens=KB_QA_MAX_TOKENS,
-                temperature=KB_QA_TEMPERATURE,
-                reasoning_effort=rc.aura_model_reasoning_effort,
-                system_prompt=KB_QA_SYSTEM_PROMPT.format(fallback=fallback),
-            )
-        )
+    def _kb_qa_active(self) -> bool:
+        return self._kb_aliyun_active()
 
     def _kb_fallback_text(self) -> str:
         return str(self.runtime_config.kb_fallback_text or "").strip() or DEFAULT_KB_FALLBACK_TEXT
-
-    def _kb_miss_text(self, user_text: str, kb_debug: dict[str, Any]) -> str:
-        if kb_debug.get("kb_error"):
-            return KB_QA_UNAVAILABLE_TEXT
-        if _kb_query_is_short(user_text):
-            kb_debug["kb_short_query"] = True
-            return str(self.runtime_config.kb_short_query_hint or "").strip() or DEFAULT_KB_SHORT_QUERY_HINT
-        return self._kb_fallback_text()
 
     def _kb_save_turn_messages(
         self,
@@ -1784,7 +1716,18 @@ class AuraPersonaGateway:
             evidence=evidence,
         )
 
-    def _run_kb_qa_stream(
+    def _kb_aliyun_client(self) -> AliyunKbClient:
+        rc = self.runtime_config
+        return AliyunKbClient(
+            AliyunKbConfig(
+                endpoint=str(rc.kb_aliyun_endpoint or "").strip(),
+                api_key=str(rc.kb_aliyun_api_key or "").strip(),
+                agent_id=str(rc.kb_aliyun_agent_id or "").strip(),
+                timeout_seconds=float(rc.kb_aliyun_timeout_seconds or 30),
+            )
+        )
+
+    def _run_aliyun_kb_stream(
         self,
         user_text: str,
         *,
@@ -1792,42 +1735,14 @@ class AuraPersonaGateway:
         started: float,
         metadata: dict[str, Any] | None,
     ) -> Iterator[dict[str, Any]]:
+        """阿里云知识库应用流式问答：RAG 在云端完成，直接转发文本流。"""
         speculative = _is_speculative_turn(metadata)
         fallback = self._kb_fallback_text()
-        hits, kb_debug = self._kb_retrieve(user_text)
-        if not hits:
-            local_text = self._kb_miss_text(user_text, kb_debug)
-            yield {"type": "delta", "text": local_text, "source": "kb_fallback"}
-            if not speculative:
-                self._kb_save_turn_messages(
-                    user_text=user_text,
-                    response=local_text,
-                    request_id=request_id,
-                    ok=True,
-                    streamed=True,
-                    kb_debug=kb_debug,
-                )
-            result = self._kb_qa_result(
-                ok=True,
-                status="completed",
-                response=local_text,
-                request_id=request_id,
-                started=started,
-                kb_hit=False,
-                kb_debug=kb_debug,
-                streamed=True,
-                speculative=speculative,
-            )
-            yield {"type": "final", "payload": result.to_dict()}
-            return
-        client = self._kb_llm_client(fallback)
-        prompt = build_kb_qa_prompt(user_text, [str(hit.get("content") or "") for hit in hits])
+        kb_debug: dict[str, Any] = {"kb_backend": "aliyun_app"}
+        client = self._kb_aliyun_client()
         response_text = ""
         final_event: dict[str, Any] = {}
-        for event in client.stream(
-            prompt,
-            metadata={"persona_gateway": True, "request_id": request_id, "kb_qa": True, "streamed": True},
-        ):
+        for event in client.stream(user_text):
             if event.get("type") == "delta":
                 delta = str(event.get("text") or "")
                 if delta:
@@ -1837,7 +1752,13 @@ class AuraPersonaGateway:
                 final_event = dict(event)
         ok = bool(final_event.get("ok"))
         status = str(final_event.get("status") or ("completed" if ok else "failed"))
-        response = (response_text.strip() or str(final_event.get("response") or "")).strip() or fallback
+        response = (response_text.strip() or str(final_event.get("response") or "")).strip()
+        if not response:
+            # 云端失败或空答：给设备一个可播报的回退话术，状态仍按失败/成功记录
+            response = fallback
+            yield {"type": "delta", "text": response, "source": "kb_fallback"}
+        kb_debug.update(dict(final_event.get("evidence") or {}))
+        kb_debug.pop("route", None)  # 顶层 route 固定为 kb_qa，后端标识见 kb_backend
         if not speculative:
             self._kb_save_turn_messages(
                 user_text=user_text,
@@ -1848,20 +1769,19 @@ class AuraPersonaGateway:
                 kb_debug=kb_debug,
             )
         result = self._kb_qa_result(
-            ok=ok,
-            status=status,
+            ok=ok or bool(response),
+            status=status if ok else "completed",
             response=response,
             request_id=request_id,
             started=started,
-            kb_hit=True,
+            kb_hit=ok,
             kb_debug=kb_debug,
             streamed=True,
             speculative=speculative,
-            llm_evidence=dict(final_event.get("evidence") or {}),
         )
         yield {"type": "final", "payload": result.to_dict()}
 
-    def _run_kb_qa_turn(
+    def _run_aliyun_kb_turn(
         self,
         user_text: str,
         *,
@@ -1871,56 +1791,55 @@ class AuraPersonaGateway:
     ) -> PersonaTurnResult:
         speculative = _is_speculative_turn(metadata)
         fallback = self._kb_fallback_text()
-        hits, kb_debug = self._kb_retrieve(user_text)
-        if not hits:
-            local_text = self._kb_miss_text(user_text, kb_debug)
-            if not speculative:
-                self._kb_save_turn_messages(
-                    user_text=user_text,
-                    response=local_text,
-                    request_id=request_id,
-                    ok=True,
-                    streamed=False,
-                    kb_debug=kb_debug,
-                )
-            return self._kb_qa_result(
-                ok=True,
-                status="completed",
-                response=local_text,
-                request_id=request_id,
-                started=started,
-                kb_hit=False,
-                kb_debug=kb_debug,
-                streamed=False,
-                speculative=speculative,
-            )
-        client = self._kb_llm_client(fallback)
-        prompt = build_kb_qa_prompt(user_text, [str(hit.get("content") or "") for hit in hits])
-        model_result = client.run(
-            prompt,
-            metadata={"persona_gateway": True, "request_id": request_id, "kb_qa": True},
-        )
-        response = str(model_result.response or "").strip() or fallback
+        kb_debug: dict[str, Any] = {"kb_backend": "aliyun_app"}
+        final = self._kb_aliyun_client().run(user_text)
+        ok = bool(final.get("ok"))
+        response = str(final.get("response") or "").strip() or fallback
+        kb_debug.update(dict(final.get("evidence") or {}))
+        kb_debug.pop("route", None)
         if not speculative:
             self._kb_save_turn_messages(
                 user_text=user_text,
                 response=response,
                 request_id=request_id,
-                ok=model_result.ok,
+                ok=ok,
                 streamed=False,
                 kb_debug=kb_debug,
             )
         return self._kb_qa_result(
-            ok=model_result.ok,
-            status=model_result.status,
+            ok=ok or bool(response),
+            status="completed",
             response=response,
             request_id=request_id,
             started=started,
-            kb_hit=True,
+            kb_hit=ok,
             kb_debug=kb_debug,
             streamed=False,
             speculative=speculative,
-            llm_evidence=dict(model_result.evidence or {}),
+        )
+
+    def _run_kb_qa_stream(
+        self,
+        user_text: str,
+        *,
+        request_id: str,
+        started: float,
+        metadata: dict[str, Any] | None,
+    ) -> Iterator[dict[str, Any]]:
+        yield from self._run_aliyun_kb_stream(
+            user_text, request_id=request_id, started=started, metadata=metadata
+        )
+
+    def _run_kb_qa_turn(
+        self,
+        user_text: str,
+        *,
+        request_id: str,
+        started: float,
+        metadata: dict[str, Any] | None,
+    ) -> PersonaTurnResult:
+        return self._run_aliyun_kb_turn(
+            user_text, request_id=request_id, started=started, metadata=metadata
         )
 
 

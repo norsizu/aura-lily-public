@@ -75,7 +75,7 @@ def aura_runtime_secret(config: AuraRuntimeConfig, key: str) -> dict[str, Any]:
         "fast_reply_api_key": config.fast_reply_api_key,
         "tts_api_key": config.tts_api_key,
         "asr_api_key": config.asr_api_key,
-        "kb_embedding_api_key": config.kb_embedding_api_key,
+        "kb_aliyun_api_key": config.kb_aliyun_api_key,
     }
     if key not in fields:
         return {"ok": False, "error": "unknown secret"}

@@ -60,14 +60,6 @@
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
             <span>问答设置</span>
           </a>
-          <a href="#kb-docs" class="nav-item" data-panel-link="kb-docs">
-            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            <span>文档管理</span>
-          </a>
-          <a href="#kb-search" class="nav-item" data-panel-link="kb-search">
-            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <span>检索测试</span>
-          </a>
         </div>
       </nav>
       <div class="sidebar-footnote">
@@ -726,135 +718,38 @@
           <div>
             <p class="eyebrow">Knowledge</p>
             <h2>问答设置</h2>
-            <p class="page-description">FastGPT 式知识库问答开关与检索参数。开启问答模式后，Aura 只依据选中的知识库回答，检索不到就直接回复兜底话术，不消耗 LLM。</p>
+            <p class="page-description">在线知识库问答开关。开启后语音对话进入严格问答：由在线知识库应用（RAG 云端完成）回答；服务不可用时直接回复兜底话术。</p>
           </div>
           <span id="kbBadge" class="badge muted">未读取</span>
         </div>
 
         <section class="panel">
           <h3>问答模式</h3>
-          <p class="hint">开启后语音对话进入严格问答：只依据激活的知识库回答；检索不到直接回复兜底话术（不调 LLM）。命中时回答仍复用 Aura LLM 的 Step Plan 配置。</p>
+          <p class="hint">对接 OpenAI 兼容的知识库应用端点（如阿里云百炼知识库应用）。检索与生成都在云端完成，本服务只转发问题并回读答案。</p>
           <div class="row">
             <div class="switchline"><input id="kbQaEnabled" type="checkbox"><span>启用知识库问答模式</span></div>
-            <div>
-              <label for="kbActiveSelect">激活的知识库</label>
-              <select id="kbActiveSelect"></select>
-            </div>
           </div>
           <div class="row">
-            <div><label for="kbTopK">检索条数 top_k（1-20）</label><input id="kbTopK" type="number" min="1" max="20" step="1"></div>
-            <div><label for="kbScoreThreshold">相似度阈值（0-1）</label><input id="kbScoreThreshold" type="number" min="0" max="1" step="0.05"></div>
+            <div><label for="kbAliyunEndpoint">应用端点 Base URL</label><input id="kbAliyunEndpoint" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"></div>
+            <div><label for="kbAliyunAgentId">应用 ID（agent_id）</label><input id="kbAliyunAgentId" placeholder="aid-xxxxxxxx"></div>
           </div>
-          <label for="kbFallbackText">未命中兜底话术</label>
-          <input id="kbFallbackText" placeholder="我的知识库里没有相关的信息。">
           <div class="row">
             <div>
-              <label for="kbQueryPrefix">短问题主语前缀（选填）</label>
-              <input id="kbQueryPrefix" placeholder="如：墨灵（问题≤6字时自动拼上再检索）">
-            </div>
-          </div>
-          <label for="kbShortQueryHint">短问题未命中提示语</label>
-          <input id="kbShortQueryHint" placeholder="这个问题有点短，我没有查到相关内容，麻烦把问题说得具体一点，比如带上想问的东西。">
-          <div class="inline-section">
-            <h4>Embedding 服务</h4>
-            <p class="hint">默认 Jina（jina-embeddings-v3），也可换成任何 OpenAI 兼容的 /embeddings 端点。不会走 StepFun 按量计费。</p>
-            <div class="row">
-              <div><label for="kbEmbeddingBaseUrl">Embedding Base URL</label><input id="kbEmbeddingBaseUrl" placeholder="https://api.jina.ai/v1"></div>
-              <div><label for="kbEmbeddingModel">Embedding Model</label><input id="kbEmbeddingModel" placeholder="jina-embeddings-v3"></div>
-            </div>
-            <div class="row">
-              <div>
-                <div class="label-line"><label for="kbEmbeddingApiKey">Embedding API Key</label><span id="kbEmbeddingKeyBadge" class="badge muted">未读取</span></div>
-                <div class="secret-control">
-                  <input id="kbEmbeddingApiKey" type="password" autocomplete="off" placeholder="粘贴 Embedding API Key">
-                  <button id="showKbEmbeddingKey" class="icon-button" type="button" aria-label="查看 Embedding API Key" title="查看/隐藏">查看</button>
-                </div>
+              <div class="label-line"><label for="kbAliyunApiKey">API Key</label><span id="kbAliyunKeyBadge" class="badge muted">未读取</span></div>
+              <div class="secret-control">
+                <input id="kbAliyunApiKey" type="password" autocomplete="off" placeholder="粘贴知识库应用 API Key">
+                <button id="showKbAliyunKey" class="icon-button" type="button" aria-label="查看知识库 API Key" title="查看/隐藏">查看</button>
               </div>
-              <div><label for="kbEmbeddingTimeout">Embedding 超时秒</label><input id="kbEmbeddingTimeout" type="number" min="1" step="1"></div>
             </div>
+            <div><label for="kbAliyunTimeout">请求超时秒</label><input id="kbAliyunTimeout" type="number" min="1" step="1"></div>
           </div>
+          <label for="kbFallbackText">不可用兜底话术</label>
+          <input id="kbFallbackText" placeholder="我的知识库里没有相关的信息。">
           <div class="actions">
             <button id="saveKbSettings">保存问答模式设置</button>
-            <button id="clearKbEmbeddingKey" class="secondary" type="button">清除 Embedding API Key</button>
+            <button id="clearKbAliyunKey" class="secondary" type="button">清除 API Key</button>
           </div>
           <div id="kbSettingsStatus" class="status"></div>
-        </section>
-      </section>
-
-      <section id="kb-docs" class="panel-page" data-panel="kb-docs">
-        <div class="page-title">
-          <div>
-            <p class="eyebrow">Knowledge</p>
-            <h2>文档管理</h2>
-            <p class="page-description">新建知识库、上传文档并向量化、查看文档列表和做检索测试。问答开关与检索参数在问答设置页配置。</p>
-          </div>
-        </div>
-
-        <section class="panel">
-          <h3>知识库管理</h3>
-          <div class="row">
-            <div><label for="kbNewName">新建知识库名称</label><input id="kbNewName" placeholder="例如：产品手册"></div>
-            <div class="history-actions"><button id="createKb" type="button">新建知识库</button></div>
-          </div>
-          <div id="kbListContainer" class="kb-table"></div>
-          <div id="kbListStatus" class="status"></div>
-        </section>
-
-        <section class="panel">
-          <h3>文档上传与列表</h3>
-          <div class="row">
-            <div>
-              <label for="kbManageSelect">选择知识库</label>
-              <select id="kbManageSelect"></select>
-            </div>
-            <div>
-              <label for="kbFileInput">上传文档（txt / md / pdf / docx，单个 ≤20MB，可多选批量上传）</label>
-              <input id="kbFileInput" type="file" accept=".txt,.md,.pdf,.docx" multiple>
-            </div>
-          </div>
-          <div class="actions compact">
-            <button id="uploadKbFile" type="button">上传并向量化</button>
-            <button id="refreshKbDocs" class="secondary" type="button">刷新文档列表</button>
-          </div>
-          <div class="row">
-            <div>
-              <label for="kbDocSearch">按文件名过滤</label>
-              <input id="kbDocSearch" placeholder="输入文件名关键字，实时过滤列表">
-            </div>
-          </div>
-          <div id="kbDocsContainer" class="kb-table"></div>
-          <div id="kbDocsPager" class="kb-pager" style="display:none">
-            <button id="kbDocsPrevPage" class="secondary" type="button">上一页</button>
-            <span id="kbDocsPageInfo" class="kb-page-info"></span>
-            <button id="kbDocsNextPage" class="secondary" type="button">下一页</button>
-          </div>
-          <div id="kbDocsStatus" class="status"></div>
-        </section>
-      </section>
-
-      <section id="kb-search" class="panel-page" data-panel="kb-search">
-        <div class="page-title">
-          <div>
-            <p class="eyebrow">Knowledge</p>
-            <h2>检索测试</h2>
-            <p class="page-description">模拟问答模式的向量检索：输入一个问题，看选中的知识库能命中哪些片段和相似度得分，用来调阈值和排查未命中。</p>
-          </div>
-        </div>
-
-        <section class="panel">
-          <h3>检索测试</h3>
-          <div class="row">
-            <div>
-              <label for="kbSearchSelect">选择知识库</label>
-              <select id="kbSearchSelect"></select>
-            </div>
-            <div><label for="kbSearchQuery">测试问题</label><input id="kbSearchQuery" placeholder="输入一个问题，看能检索到哪些片段"></div>
-          </div>
-          <div class="actions compact">
-            <button id="testKbSearch" type="button">检索测试</button>
-          </div>
-          <div id="kbSearchStatus" class="status"></div>
-          <div id="kbSearchResults" class="kb-search-results"></div>
         </section>
       </section>
     </main>

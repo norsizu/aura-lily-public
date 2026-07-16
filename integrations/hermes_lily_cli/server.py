@@ -16,7 +16,7 @@ import traceback
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import BoundedSemaphore, Lock, Thread, current_thread, main_thread
+from threading import BoundedSemaphore, Thread, current_thread, main_thread
 from time import monotonic
 from typing import Any, Iterator
 from urllib.parse import parse_qs, unquote
@@ -58,16 +58,6 @@ try:
     )
     from integrations.aura_persona_gateway.city_names import normalize_city_name
     from integrations.aura_persona_gateway.config import load_persona_config
-    from integrations.aura_persona_gateway.knowledge import (
-        EmbeddingClient,
-        EmbeddingConfig,
-        KnowledgeStore,
-        default_kb_db_path,
-        default_kb_files_dir,
-        file_type_of,
-        kb_search,
-        process_document,
-    )
     from integrations.aura_persona_gateway.llm import (
         DirectLlmClient,
         DirectLlmConfig,
@@ -98,24 +88,12 @@ except ImportError:  # pragma: no cover - persona gateway can be omitted in tiny
     update_persona_state = None
     AuraPersonaGateway = None
     LilyPersonaStore = None
-    EmbeddingClient = None
-    EmbeddingConfig = None
-    KnowledgeStore = None
-    default_kb_db_path = None
-    default_kb_files_dir = None
-    file_type_of = None
-    kb_search = None
-    process_document = None
 
     def normalize_city_name(value: Any) -> str:
         return str(value or "").strip()
 
 
 MAX_REQUEST_BYTES = 64 * 1024
-# 知识库文档上传（base64 JSON）单独放宽限额；其他路由仍走 64KB。
-KB_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
-# 批量上传时多个文档的向量化必须排队跑：Jina 免费档并发上限只有 2，并发会 429。
-_KB_PROCESS_LOCK = Lock()
 DEFAULT_MAX_CONCURRENCY = 1
 DEFAULT_QUEUE_TIMEOUT_SECONDS = 30.0
 USER_GEO_CACHE_TTL_SECONDS = 900
@@ -518,206 +496,6 @@ class LilyRuntime:
             return {"ok": False, "error": "persona gateway is unavailable"}
         return update_persona_state(self.persona_config, self.persona_store, updates)
 
-    # ------------------------------------------------------------- KB admin
-    def _kb_store(self) -> Any:
-        if not self.persona_config or not KnowledgeStore:
-            return None
-        return KnowledgeStore(default_kb_db_path(self.persona_config.persona_home))
-
-    def _kb_embedder(self) -> tuple[Any, str]:
-        config = self._refresh_aura_runtime_config()
-        if not config or not EmbeddingClient:
-            return None, "aura runtime config is unavailable"
-        if not str(config.kb_embedding_api_key or "").strip():
-            return None, "尚未配置知识库 embedding API Key，请先在后台保存"
-        return (
-            EmbeddingClient(
-                EmbeddingConfig(
-                    base_url=config.kb_embedding_base_url,
-                    api_key=config.kb_embedding_api_key,
-                    model=config.kb_embedding_model,
-                    timeout_seconds=float(config.kb_embedding_timeout_seconds or 30),
-                )
-            ),
-            "",
-        )
-
-    def _kb_raw_file_path(self, doc: dict[str, Any]) -> Path:
-        suffix = Path(str(doc.get("filename") or "")).suffix.lower()
-        return default_kb_files_dir(self.persona_config.persona_home) / f"{doc.get('id')}{suffix}"
-
-    def _kb_remove_raw_file(self, doc: dict[str, Any]) -> None:
-        if not self.persona_config or not default_kb_files_dir:
-            return
-        try:
-            path = self._kb_raw_file_path(doc)
-            if path.exists():
-                path.unlink()
-        except OSError:
-            pass
-
-    def _kb_process_async(self, store: Any, embedder: Any, *, doc_id: str, kb_id: str, filename: str, raw: bytes) -> None:
-        def worker() -> None:
-            # 全局锁串行化：排队中的文档保持 pending，前端轮询能看到进度。
-            with _KB_PROCESS_LOCK:
-                try:
-                    process_document(store, embedder, doc_id=doc_id, kb_id=kb_id, filename=filename, raw=raw)
-                except Exception as exc:  # pragma: no cover - process_document 自己会记 failed，这里兜底日志
-                    sys.stderr.write(f"aura-lily-server: kb process failed: {exc.__class__.__name__}: {exc}\n")
-
-        Thread(target=worker, name=f"kb-process-{doc_id}", daemon=True).start()
-
-    def kb_list(self) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        config = self._refresh_aura_runtime_config()
-        return {
-            "ok": True,
-            "kbs": store.list_kbs(),
-            "active_id": str(getattr(config, "kb_active_id", "") or ""),
-            "enabled": bool(getattr(config, "kb_qa_enabled", False)),
-        }
-
-    def kb_create(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        name = str(updates.get("name") or "").strip()
-        if not name:
-            return {"ok": False, "error": "name is required"}
-        if len(name) > 100:
-            return {"ok": False, "error": "name is too long; max 100 chars"}
-        return {"ok": True, "kb": store.create_kb(name)}
-
-    def kb_delete(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        kb_id = str(updates.get("kb_id") or "").strip()
-        if not kb_id:
-            return {"ok": False, "error": "kb_id is required"}
-        docs = store.list_documents(kb_id)
-        deleted = store.delete_kb(kb_id)
-        for doc in docs:
-            self._kb_remove_raw_file(doc)
-        config = self._refresh_aura_runtime_config()
-        if config is not None and update_aura_runtime and str(getattr(config, "kb_active_id", "") or "") == kb_id:
-            # 激活库被删掉后清掉指针，避免问答模式指向一个不存在的库
-            self.aura_runtime_config = update_aura_runtime(config, {"kb_active_id": ""})
-        return {"ok": bool(deleted), "deleted": bool(deleted)}
-
-    def kb_docs(self, kb_id: str) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        kb_id = str(kb_id or "").strip()
-        if not kb_id:
-            return {"ok": False, "error": "kb_id is required"}
-        return {"ok": True, "kb_id": kb_id, "docs": store.list_documents(kb_id)}
-
-    def kb_upload(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None or not process_document or not file_type_of:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        kb_id = str(updates.get("kb_id") or "").strip()
-        filename = str(updates.get("filename") or "").strip()
-        content_b64 = str(updates.get("content_base64") or "").strip()
-        if not kb_id or not filename or not content_b64:
-            return {"ok": False, "error": "kb_id, filename and content_base64 are required"}
-        if not store.get_kb(kb_id):
-            return {"ok": False, "error": "kb not found"}
-        file_type = file_type_of(filename)
-        if not file_type:
-            return {"ok": False, "error": "仅支持 txt / md / pdf / docx 文件"}
-        try:
-            raw = base64.b64decode(content_b64, validate=True)
-        except (ValueError, TypeError):
-            return {"ok": False, "error": "content_base64 is not valid base64"}
-        if not raw:
-            return {"ok": False, "error": "file is empty"}
-        embedder, error = self._kb_embedder()
-        if embedder is None:
-            return {"ok": False, "error": error}
-        doc = store.create_document(kb_id, filename=filename, file_type=file_type)
-        raw_path = self._kb_raw_file_path(doc)
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_path.write_bytes(raw)
-        # embedding 可能要跑几十秒到几分钟，放后台线程，前端轮询 /admin/kb/docs 看状态
-        self._kb_process_async(store, embedder, doc_id=doc["id"], kb_id=kb_id, filename=filename, raw=raw)
-        return {"ok": True, "doc": store.get_document(doc["id"]) or doc}
-
-    def kb_doc_delete(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        doc_id = str(updates.get("doc_id") or "").strip()
-        if not doc_id:
-            return {"ok": False, "error": "doc_id is required"}
-        doc = store.get_document(doc_id)
-        if not doc:
-            return {"ok": False, "error": "document not found"}
-        store.delete_document(doc_id)
-        self._kb_remove_raw_file(doc)
-        return {"ok": True}
-
-    def kb_doc_reindex(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None or not process_document:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        doc_id = str(updates.get("doc_id") or "").strip()
-        if not doc_id:
-            return {"ok": False, "error": "doc_id is required"}
-        doc = store.get_document(doc_id)
-        if not doc:
-            return {"ok": False, "error": "document not found"}
-        raw_path = self._kb_raw_file_path(doc)
-        if not raw_path.exists():
-            return {"ok": False, "error": "原始文件已不存在，无法重建索引，请重新上传"}
-        embedder, error = self._kb_embedder()
-        if embedder is None:
-            return {"ok": False, "error": error}
-        raw = raw_path.read_bytes()
-        store.set_document_status(doc_id, status="pending")
-        self._kb_process_async(
-            store,
-            embedder,
-            doc_id=doc_id,
-            kb_id=str(doc.get("kb_id") or ""),
-            filename=str(doc.get("filename") or ""),
-            raw=raw,
-        )
-        return {"ok": True, "doc": store.get_document(doc_id)}
-
-    def kb_search_test(self, updates: dict[str, Any]) -> dict[str, Any]:
-        store = self._kb_store()
-        if store is None or not kb_search:
-            return {"ok": False, "error": "knowledge store is unavailable"}
-        kb_id = str(updates.get("kb_id") or "").strip()
-        query = str(updates.get("query") or "").strip()
-        if not kb_id or not query:
-            return {"ok": False, "error": "kb_id and query are required"}
-        embedder, error = self._kb_embedder()
-        if embedder is None:
-            return {"ok": False, "error": error}
-        config = self.aura_runtime_config
-        try:
-            threshold = float(str(getattr(config, "kb_score_threshold", "0.45") or "0.45").strip())
-        except (TypeError, ValueError):
-            threshold = 0.45
-        try:
-            hits = kb_search(
-                store,
-                embedder,
-                kb_id=kb_id,
-                query=query,
-                top_k=int(getattr(config, "kb_top_k", 5) or 5),
-                score_threshold=threshold,
-            )
-        except Exception as exc:  # noqa: BLE001 - embedding API 失败要给出可读错误
-            return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
-        return {"ok": True, "hits": hits, "score_threshold": threshold}
-
     def background_task_result(self, task_id: str) -> dict[str, Any]:
         if not self.persona_config or not self.persona_store:
             return {"ok": False, "status": "unavailable", "error": "persona gateway is unavailable"}
@@ -1087,22 +865,6 @@ def make_handler(config: LilyServerConfig) -> type[BaseHTTPRequestHandler]:
                 response = runtime.aura_runtime_secret(key)
                 self._send_json(response, status=200 if response.get("ok") else 404)
                 return
-            if request_path == "/admin/kb/list":
-                if not self._admin_allowed():
-                    self._send_json({"ok": False, "error": "unauthorized"}, status=401)
-                    return
-                response = runtime.kb_list()
-                self._send_json(response, status=200 if response.get("ok") else 500)
-                return
-            if request_path == "/admin/kb/docs":
-                if not self._admin_allowed():
-                    self._send_json({"ok": False, "error": "unauthorized"}, status=401)
-                    return
-                query = parse_qs(urlsplit(self.path).query)
-                kb_id = (query.get("kb_id") or [""])[0]
-                response = runtime.kb_docs(kb_id)
-                self._send_json(response, status=200 if response.get("ok") else 400)
-                return
             if self.path == "/persona/health":
                 self._send_json(runtime.persona_health())
                 return
@@ -1153,19 +915,11 @@ def make_handler(config: LilyServerConfig) -> type[BaseHTTPRequestHandler]:
                 "/admin/hermes/config",
                 "/admin/aura/runtime",
                 "/admin/aura/weather/refresh",
-                "/admin/kb/create",
-                "/admin/kb/delete",
-                "/admin/kb/upload",
-                "/admin/kb/doc/delete",
-                "/admin/kb/doc/reindex",
-                "/admin/kb/search",
             }:
                 self._send_json({"ok": False, "error": "not_found"}, status=404)
                 return
             try:
-                payload = self._read_json(
-                    limit=KB_UPLOAD_MAX_BYTES if self.path == "/admin/kb/upload" else MAX_REQUEST_BYTES
-                )
+                payload = self._read_json(limit=MAX_REQUEST_BYTES)
             except ValueError as exc:
                 self._send_json({"ok": False, "status": "failed", "error": str(exc)}, status=400)
                 return
@@ -1216,25 +970,6 @@ def make_handler(config: LilyServerConfig) -> type[BaseHTTPRequestHandler]:
                     return
                 response = runtime.refresh_aura_weather(payload)
                 self._send_json(response, status=200 if response.get("ok") else 502)
-                return
-
-            if self.path.startswith("/admin/kb/"):
-                if not self._admin_allowed():
-                    self._send_json({"ok": False, "error": "unauthorized"}, status=401)
-                    return
-                if self.path == "/admin/kb/create":
-                    response = runtime.kb_create(payload)
-                elif self.path == "/admin/kb/delete":
-                    response = runtime.kb_delete(payload)
-                elif self.path == "/admin/kb/upload":
-                    response = runtime.kb_upload(payload)
-                elif self.path == "/admin/kb/doc/delete":
-                    response = runtime.kb_doc_delete(payload)
-                elif self.path == "/admin/kb/doc/reindex":
-                    response = runtime.kb_doc_reindex(payload)
-                else:
-                    response = runtime.kb_search_test(payload)
-                self._send_json(response, status=200 if response.get("ok") else 400)
                 return
 
             goal = str(payload.get("goal") or payload.get("text") or payload.get("transcript") or "").strip()

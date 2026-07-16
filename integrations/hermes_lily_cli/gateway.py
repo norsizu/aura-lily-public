@@ -6357,7 +6357,7 @@ async def stream_dialogue_and_tts_from_bridge(
                 )
                 if (
                     str(final_evidence.get("route") or "") == "kb_qa"
-                    or str(final_evidence.get("kb_backend") or "") in {"local", "aliyun_app"}
+                    or str(final_evidence.get("kb_backend") or "") == "aliyun_app"
                 ):
                     knowledge_stream = True
                 continue
@@ -7124,12 +7124,13 @@ def pop_stream_tts_segment(
     if leading_wrapper_chars:
         cut = leading + leading_wrapper_chars
         return value[:cut].strip(), value[cut:]
+    # Streaming deltas can end in the middle of a Chinese word. A character
+    # count cutoff can turn one word into separate TTS requests and create an
+    # audible pause. Wait for punctuation; the final flush sends any remaining
+    # unpunctuated text when the model stream ends.
     min_chars = max(2, BRIDGE_STREAM_MIN_CHARS)
-    first_limit = min(BRIDGE_STREAM_FIRST_SEGMENT_CHARS, TTS_TEXT_CHUNK_CHARS)
-    followup_limit = max(min_chars, int(followup_limit_chars or TTS_TEXT_CHUNK_CHARS))
-    hard_limit = max(min_chars, first_limit if first_segment else followup_limit)
     strong_punctuation = "。！？!?；;\n"
-    soft_punctuation = "，,、 "
+    soft_punctuation = "，,、：: "
     for index, ch in enumerate(stripped_left, start=1):
         if index < min_chars:
             continue
@@ -7146,24 +7147,6 @@ def pop_stream_tts_segment(
             if require_sentence_end:
                 continue
             cut = leading + index
-            if _has_unclosed_stage_wrapper(value[:cut]):
-                continue
-            if _stream_tts_segment_is_incomplete(value[:cut], remainder=value[cut:]):
-                continue
-            if first_segment and _stream_tts_segment_too_short_after_cleaning(value[:cut]):
-                continue
-            return value[:cut].strip(), value[cut:]
-        if index >= hard_limit:
-            if require_sentence_end:
-                continue
-            lookahead_window = 6 if first_segment else 4
-            lookahead = stripped_left[index : min(len(stripped_left), index + lookahead_window)]
-            if lookahead and any(ch in strong_punctuation + soft_punctuation for ch in lookahead):
-                continue
-            cut_index = index
-            if cut_index < len(stripped_left) and stripped_left[cut_index] in strong_punctuation:
-                cut_index += 1
-            cut = leading + cut_index
             if _has_unclosed_stage_wrapper(value[:cut]):
                 continue
             if _stream_tts_segment_is_incomplete(value[:cut], remainder=value[cut:]):

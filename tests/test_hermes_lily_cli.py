@@ -3281,10 +3281,10 @@ def test_gateway_bridge_stream_sends_short_unpunctuated_first_segment(monkeypatc
 
     assert streamed is True
     text_events = [item for item in connections[0].socket.sent if item.get("type") == "tts.text.delta"]
-    assert [item["data"]["text"] for item in text_events] == ["我在这里陪你", "慢慢来"]
-    assert len(text_events[0]["data"]["text"]) == 6
+    # 无标点文本不再按字符硬切，由 final flush 整段提交，避免词中停顿。
+    assert [item["data"]["text"] for item in text_events] == ["我在这里陪你慢慢来"]
     audio_frames = [item for item in sent if isinstance(item, bytes)]
-    assert any(frame[16:].startswith("pcm:我在这里陪你".encode("utf-8")) for frame in audio_frames)
+    assert any(frame[16:].startswith("pcm:我在这里陪你慢慢来".encode("utf-8")) for frame in audio_frames)
     assert audio_frames[-1][12] == 1
 
 
@@ -4012,10 +4012,11 @@ def test_gateway_pop_stream_tts_segment_uses_fast_first_segment(monkeypatch):
     monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 6)
     monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 22)
 
+    # 没有标点时不再按字符硬切，等待后续 delta。
     segment, rest = gateway_module.pop_stream_tts_segment("我在这里陪你慢慢来", force=False)
 
-    assert segment == "我在这里陪你"
-    assert rest == "慢慢来"
+    assert segment == ""
+    assert rest == "我在这里陪你慢慢来"
 
 
 def test_gateway_pop_stream_tts_segment_default_starts_after_four_chars(monkeypatch):
@@ -4025,10 +4026,72 @@ def test_gateway_pop_stream_tts_segment_default_starts_after_four_chars(monkeypa
     monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 4)
     monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 22)
 
+    # 无标点文本不切分；有标点时仍按标点边界切。
     segment, rest = gateway_module.pop_stream_tts_segment("我在这里陪你慢慢来", force=False)
 
-    assert segment == "我在这里"
+    assert segment == ""
+    assert rest == "我在这里陪你慢慢来"
+
+    segment, rest = gateway_module.pop_stream_tts_segment("我在这里，陪你慢慢来", force=False)
+
+    assert segment == "我在这里，"
     assert rest == "陪你慢慢来"
+
+
+def test_gateway_pop_stream_tts_segment_does_not_split_chinese_word_at_char_limit(monkeypatch):
+    from integrations.hermes_lily_cli import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_MIN_CHARS", 4)
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 6)
+    monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 18)
+
+    # “目前”不能在“目”和“前”之间被拆成两个 TTS 请求。
+    segment, pending = gateway_module.pop_stream_tts_segment(
+        "关于发货时间，目",
+        force=False,
+        first_segment=True,
+        followup_limit_chars=8,
+    )
+
+    assert segment == ""
+    assert pending == "关于发货时间，目"
+
+
+def test_gateway_pop_stream_tts_segment_splits_at_natural_colon_boundary(monkeypatch):
+    from integrations.hermes_lily_cli import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_MIN_CHARS", 4)
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 6)
+    monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 18)
+
+    segment, pending = gateway_module.pop_stream_tts_segment(
+        "关于发货时间，目前的情况如下：整体进度",
+        force=False,
+        first_segment=True,
+        followup_limit_chars=8,
+    )
+
+    assert segment == "关于发货时间，目前的情况如下："
+    assert pending == "整体进度"
+
+
+def test_gateway_pop_stream_tts_segment_long_unpunctuated_delta_waits_for_final_flush(monkeypatch):
+    from integrations.hermes_lily_cli import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_MIN_CHARS", 4)
+    monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 6)
+    monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 18)
+
+    text = "这是一段没有任何标点但已经远远超过旧字符限制的流式文本"
+    segment, pending = gateway_module.pop_stream_tts_segment(
+        text,
+        force=False,
+        first_segment=False,
+        followup_limit_chars=8,
+    )
+
+    assert segment == ""
+    assert pending == text
 
 
 def test_gateway_flush_stream_tts_segments_splits_final_remainder(monkeypatch):
@@ -4038,9 +4101,14 @@ def test_gateway_flush_stream_tts_segments_splits_final_remainder(monkeypatch):
     monkeypatch.setattr(gateway_module, "BRIDGE_STREAM_FIRST_SEGMENT_CHARS", 4)
     monkeypatch.setattr(gateway_module, "TTS_TEXT_CHUNK_CHARS", 22)
 
+    # 无标点的最终剩余文本由 final flush 整体提交，不再按字符切开。
     segments = flush_stream_tts_segments("我在这里陪你慢慢来")
 
-    assert segments == ["我在这里", "陪你慢慢来"]
+    assert segments == ["我在这里陪你慢慢来"]
+
+    segments = flush_stream_tts_segments("我在这里，陪你慢慢来")
+
+    assert segments == ["我在这里，", "陪你慢慢来"]
 
 
 def test_gateway_flush_stream_tts_segments_drops_unclosed_stage_tail(monkeypatch):
@@ -9677,7 +9745,7 @@ def test_gateway_stream_tts_first_segment_waits_for_nearby_comma(monkeypatch):
 def test_gateway_stream_tts_followup_can_use_ws_eager_limit():
     text = "后面这一段应该更早送进语音队列继续生成。"
 
-    default_segment, _ = pop_stream_tts_segment(text, force=False, first_segment=False)
+    default_segment, default_pending = pop_stream_tts_segment(text, force=False, first_segment=False)
     eager_segment, eager_pending = pop_stream_tts_segment(
         text,
         force=False,
@@ -9685,9 +9753,10 @@ def test_gateway_stream_tts_followup_can_use_ws_eager_limit():
         followup_limit_chars=8,
     )
 
-    assert len(eager_segment) < len(default_segment)
-    assert eager_segment == "后面这一段应该更"
-    assert eager_pending.startswith("早送进")
+    # followup_limit_chars 仅保留签名兼容，不再按字符硬切；
+    # 两种调用都必须等到强标点边界，不得把“更早”拆成两段。
+    assert eager_segment == default_segment == "后面这一段应该更早送进语音队列继续生成。"
+    assert eager_pending == default_pending == ""
 
 
 def test_gateway_device_spoken_text_strips_obvious_roleplay_markup():
